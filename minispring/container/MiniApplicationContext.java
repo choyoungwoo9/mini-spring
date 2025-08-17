@@ -7,6 +7,7 @@ import minispring.exception.NoUniqueBeanException;
 import java.io.File;
 import java.io.IOException;
 import java.lang.reflect.Field;
+import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.net.URL;
 import java.util.*;
@@ -34,7 +35,6 @@ public class MiniApplicationContext {
         }
 
         String packagePath = msc.value().replace('.', '/');
-        System.out.println("packagePath: " + packagePath);
         if (Thread.currentThread().getContextClassLoader().getResource(packagePath) == null) {
             throw new RuntimeException("Package not found: " + packagePath + " (scan fail)");
         }
@@ -60,13 +60,14 @@ public class MiniApplicationContext {
                                 continue;
                             Object instance = clazz.getDeclaredConstructor().newInstance();
                             setBean(clazz, instance);
-                        } catch (Exception e) {
+                            for (Class<?> interfaceClass : clazz.getInterfaces()) {
+                                setBean(interfaceClass, instance);
+                            }
+                        } catch (ClassNotFoundException | NoSuchMethodException | InstantiationException |
+                                 IllegalAccessException | InvocationTargetException e) {
                             System.err.println("Can't instantiate " + fullClassName);
                             System.err.println("Error type: " + e.getClass().getSimpleName());
-                            System.err.println("Error message: " + e.getMessage());
-                            e.printStackTrace();
                         }
-
                     }
                 } else {
                     System.out.println("Skip protocol " + protocol);
