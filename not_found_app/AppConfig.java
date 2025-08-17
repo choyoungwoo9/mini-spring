@@ -1,9 +1,9 @@
-package 미발견_app;
+package not_found_app;
 
 import minispring.annotation.MiniComponentScan;
 import minispring.annotation.MiniConfiguration;
 
 @MiniConfiguration
-@MiniComponentScan("미발견_app")
+@MiniComponentScan("not_found_app")
 public class AppConfig {
 }

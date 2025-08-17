@@ -1,9 +1,9 @@
-package 모호_app;
+package ambiguous_app;
 
 import minispring.annotation.MiniComponentScan;
 import minispring.annotation.MiniConfiguration;
 
 @MiniConfiguration
-@MiniComponentScan("모호_app")
+@MiniComponentScan("ambiguous_app")
 public class AppConfig {
 }

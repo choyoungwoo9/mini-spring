@@ -1,4 +1,4 @@
-package 모호_app;
+package ambiguous_app;
 
 import minispring.annotation.MiniComponent;
 

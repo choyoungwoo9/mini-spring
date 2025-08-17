@@ -1,4 +1,4 @@
-package 모호_app;
+package ambiguous_app;
 
 public interface DataService {
     void processData();

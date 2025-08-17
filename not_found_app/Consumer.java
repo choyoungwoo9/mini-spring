@@ -1,4 +1,4 @@
-package 미발견_app;
+package not_found_app;
 
 import minispring.annotation.MiniAutowired;
 import minispring.annotation.MiniComponent;

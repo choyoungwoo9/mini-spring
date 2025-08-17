@@ -1,4 +1,4 @@
-package 모호_app;
+package ambiguous_app;
 
 import minispring.container.MiniApplicationContext;
 import minispring.exception.NoUniqueBeanException;
@@ -7,9 +7,7 @@ public class Main {
     public static void main(String[] args) {
         System.out.println("=== 모호성 테스트 ===");
         try {
-            var ctx = new MiniApplicationContext(AppConfig.class);
-            var consumer = ctx.getBean(Consumer.class);
-            consumer.doWork();
+            new MiniApplicationContext(AppConfig.class);
         } catch (Exception e) {
             System.err.println("발생한 예외: " + e.getClass().getSimpleName());
             System.err.println("예외 메시지: " + e.getMessage());

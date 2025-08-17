@@ -1,4 +1,4 @@
-package 미발견_app;
+package not_found_app;
 
 public interface NonExistentService {
     void doSomething();
