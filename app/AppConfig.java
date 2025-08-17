@@ -10,5 +10,5 @@ import java.time.Clock;
 @MiniComponentScan("app")
 public class AppConfig {
     @MiniBean
-    Clock clock() { return Clock.systemUTC(); }
+    public Clock clock() { return Clock.systemUTC(); }
 }
