@@ -8,12 +8,13 @@ public class Main {
             System.out.println("=== Simple Qualifier App 테스트 ===");
             
             MiniApplicationContext context = new MiniApplicationContext(AppConfig.class);
-            
-            // 기본 MessageService 테스트
-            MessageService defaultService = context.getBean(MessageService.class);
+
+            MessageService defaultService = context.getBean(MessageService.class, "welcome");
+//            MessageService defaultService = context.getBean(DefaultMessageService.class);
+//            MessageService defaultService = context.getBean(MessageService.class);
             System.out.println("Default service: " + defaultService.getMessage());
-            
-            // Client 테스트 - qualifier가 붙은 MessageService 주입
+
+            //웰컴 클라이언트(by qualifier) 주입 확인
             Client client = context.getBean(Client.class);
             client.printMessage();
             
