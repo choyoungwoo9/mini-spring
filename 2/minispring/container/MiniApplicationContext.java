@@ -63,9 +63,10 @@ public class MiniApplicationContext {
                             if (clazz.isAnnotationPresent(MiniQualifier.class)) {
                                 qualifier = clazz.getAnnotation(MiniQualifier.class).value();
                             }
-                            setBean(clazz, instance, qualifier);
+                            boolean isPrimary = clazz.isAnnotationPresent(MiniPrimary.class);
+                            setBean(clazz, instance, qualifier, isPrimary);
                             for (Class<?> interfaceClass : clazz.getInterfaces()) {
-                                setBean(interfaceClass, instance, qualifier);
+                                setBean(interfaceClass, instance, qualifier, isPrimary);
                             }
                         } catch (ClassNotFoundException | NoSuchMethodException | InstantiationException |
                                  IllegalAccessException | InvocationTargetException e) {
@@ -92,7 +93,8 @@ public class MiniApplicationContext {
                     if (method.isAnnotationPresent(MiniQualifier.class)) {
                         qualifier = method.getAnnotation(MiniQualifier.class).value();
                     }
-                    setBean(beanClass, beanInstance, qualifier);
+                    boolean isPrimary = method.isAnnotationPresent(MiniPrimary.class);
+                    setBean(beanClass, beanInstance, qualifier, isPrimary);
                 } catch (Exception e) {
                     System.err.println("Can't instantiate " + method.getName());
                     System.err.println(e.getMessage());
@@ -132,9 +134,9 @@ public class MiniApplicationContext {
         }
     }
 
-    private void setBean(Class<?> type, Object instance, String qualifier) {
+    private void setBean(Class<?> type, Object instance, String qualifier, boolean isPrimary) {
         List<BeanDefinition> beanList = beans.computeIfAbsent(type, k -> new ArrayList<>());
-        beanList.add(new BeanDefinition(instance, qualifier));
+        beanList.add(new BeanDefinition(instance, qualifier, isPrimary));
     }
     
     private Object findBean(Class<?> type, String qualifier) {
@@ -156,8 +158,22 @@ public class MiniApplicationContext {
                 " available");
         }
         
-        // 매칭되는 빈이 여러 개면 예외 발생
+        // 매칭되는 빈이 여러 개면 primary=true인 빈 찾기
         if (matchingBeans.size() > 1) {
+            List<BeanDefinition> primaryBeans = matchingBeans.stream()
+                .filter(BeanDefinition::isPrimary)
+                .toList();
+                
+            if (primaryBeans.size() == 1) {
+                return primaryBeans.get(0).getInstance();
+            } else if (primaryBeans.size() > 1) {
+                throw new NoUniqueBeanException("Multiple primary beans found for type '" + type.getName() + 
+                    "': " + primaryBeans.stream()
+                        .map(b -> b.getInstance().getClass().getName())
+                        .collect(java.util.stream.Collectors.joining(", ")));
+            }
+            
+            // primary가 없는 경우 기존과 동일하게 예외 발생
             throw new NoUniqueBeanException("No qualifying bean of type '" + type.getName() + 
                 "'" + (qualifier != null ? " with qualifier '" + qualifier + "'" : "") + 
                 " available: expected single matching bean but found " + matchingBeans.size() + 
