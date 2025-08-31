@@ -11,127 +11,196 @@ import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.net.URL;
 import java.util.*;
+import java.util.stream.Collectors;
 
 public class MiniApplicationContext {
     private final Map<Class<?>, List<BeanDefinition>> beans = new HashMap<>();
     private Object configInstance = null;
 
     public MiniApplicationContext(Class<?> configClass) {
+        validateConfigClass(configClass);
+        initializeConfigInstance(configClass);
+        scanAndRegisterComponents(configClass);
+        registerBeansFromConfigMethods(configClass);
+        injectDependencies();
+    }
+
+    private void validateConfigClass(Class<?> configClass) {
         if (!configClass.isAnnotationPresent(MiniConfiguration.class)) {
-            //TODO: 전용 에러 클래스로 변경
             throw new RuntimeException("@MiniConfiguration annotation not found");
         }
+    }
 
+    private void initializeConfigInstance(Class<?> configClass) {
         try {
             configInstance = configClass.getDeclaredConstructor().newInstance();
         } catch (Exception e) {
             throw new RuntimeException("Failed to create config instance", e);
         }
+    }
 
-        MiniComponentScan msc = configClass.getAnnotation(MiniComponentScan.class);
-        if (msc == null) {
-            //에러 대신 config 클래스 하위 경로를 사용할지 고민
-            throw new RuntimeException("@MiniComponentScan annotation not found");
-        }
-
-        String packagePath = msc.value().replace('.', '/');
-        if (Thread.currentThread().getContextClassLoader().getResource(packagePath) == null) {
-            throw new RuntimeException("Package not found: " + packagePath + " (scan fail)");
-        }
-
-        //컴포넌트 스캔 후 컴포넌트 등록
+    private void scanAndRegisterComponents(Class<?> configClass) {
+        String packagePath = getPackagePath(configClass);
+        
         try {
             List<URL> urls = Collections.list(Thread.currentThread().getContextClassLoader().getResources(packagePath));
             for (URL url : urls) {
-                String protocol = url.getProtocol();
-                if (protocol.equals("file")) {
-                    File directory = new File(url.getFile());
-                    File[] files = directory.listFiles();
-                    if (files == null)
-                        continue;
-                    for (File file : files) {
-                        if (!file.getName().endsWith(".class"))
-                            continue;
-                        String className = file.getName().substring(0, file.getName().length() - 6);
-                        String fullClassName = packagePath + "." + className;
-                        try {
-                            Class<?> clazz = Class.forName(fullClassName);
-                            if (!clazz.isAnnotationPresent(MiniComponent.class))
-                                continue;
-                            Object instance = clazz.getDeclaredConstructor().newInstance();
-                            String qualifier = null;
-                            if (clazz.isAnnotationPresent(MiniQualifier.class)) {
-                                qualifier = clazz.getAnnotation(MiniQualifier.class).value();
-                            }
-                            boolean isPrimary = clazz.isAnnotationPresent(MiniPrimary.class);
-                            setBean(clazz, instance, qualifier, isPrimary);
-                            for (Class<?> interfaceClass : clazz.getInterfaces()) {
-                                setBean(interfaceClass, instance, qualifier, isPrimary);
-                            }
-                        } catch (ClassNotFoundException | NoSuchMethodException | InstantiationException |
-                                 IllegalAccessException | InvocationTargetException e) {
-                            System.err.println("Can't instantiate " + fullClassName);
-                            System.err.println("Error type: " + e.getClass().getSimpleName());
-                        }
-                    }
+                if ("file".equals(url.getProtocol())) {
+                    processClassFilesInDirectory(url.getFile(), packagePath);
                 } else {
-                    System.out.println("Skip protocol " + protocol);
+                    logSkippedProtocol(url.getProtocol());
                 }
             }
         } catch (IOException e) {
-            throw new RuntimeException("패키지를 찾을 수 없음: " + packagePath + " (scan fail)");
+            throw new RuntimeException("Failed to scan package: " + packagePath, e);
         }
+    }
 
-        //bean 등록
-        Method[] methods = configClass.getDeclaredMethods();
-        for (Method method : methods) {
+    private String getPackagePath(Class<?> configClass) {
+        MiniComponentScan scanAnnotation = configClass.getAnnotation(MiniComponentScan.class);
+        if (scanAnnotation == null) {
+            throw new RuntimeException("@MiniComponentScan annotation not found");
+        }
+        return scanAnnotation.value().replace('.', '/');
+    }
+
+    private void processClassFilesInDirectory(String directoryPath, String packagePath) {
+        File directory = new File(directoryPath);
+        File[] files = directory.listFiles();
+        if (files == null) return;
+
+        for (File file : files) {
+            if (file.isFile() && file.getName().endsWith(".class")) {
+                processClassFile(file, packagePath);
+            }
+        }
+    }
+
+    private void processClassFile(File file, String packagePath) {
+        String className = file.getName().replace(".class", "");
+        String fullClassName = packagePath + "/" + className;
+        
+        try {
+            Class<?> clazz = Class.forName(fullClassName.replace('/', '.'));
+            if (clazz.isAnnotationPresent(MiniComponent.class)) {
+                registerComponentClass(clazz);
+            }
+        } catch (Exception e) {
+            logClassLoadingError(fullClassName, e);
+        }
+    }
+
+    private void registerComponentClass(Class<?> clazz) throws Exception {
+        Object instance = createInstance(clazz);
+        String qualifier = extractQualifier(clazz);
+        boolean isPrimary = clazz.isAnnotationPresent(MiniPrimary.class);
+        
+        registerBean(clazz, instance, qualifier, isPrimary);
+        registerInterfaces(clazz, instance, qualifier, isPrimary);
+    }
+
+    private Object createInstance(Class<?> clazz) throws Exception {
+        return clazz.getDeclaredConstructor().newInstance();
+    }
+
+    private String extractQualifier(Class<?> clazz) {
+        return clazz.isAnnotationPresent(MiniQualifier.class) 
+            ? clazz.getAnnotation(MiniQualifier.class).value() 
+            : null;
+    }
+
+    private void registerBean(Class<?> type, Object instance, String qualifier, boolean isPrimary) {
+        setBean(type, instance, qualifier, isPrimary);
+    }
+
+    private void registerInterfaces(Class<?> clazz, Object instance, String qualifier, boolean isPrimary) {
+        for (Class<?> iface : clazz.getInterfaces()) {
+            setBean(iface, instance, qualifier, isPrimary);
+        }
+    }
+
+    private void logClassLoadingError(String className, Exception e) {
+        System.err.println("Failed to load class: " + className);
+        System.err.println("Error: " + e.getClass().getSimpleName() + " - " + e.getMessage());
+    }
+
+    private void logSkippedProtocol(String protocol) {
+        System.out.println("Skipping unsupported protocol: " + protocol);
+    }
+
+    private void registerBeansFromConfigMethods(Class<?> configClass) {
+        for (Method method : configClass.getDeclaredMethods()) {
             if (method.isAnnotationPresent(MiniBean.class)) {
-                try {
-                    Object beanInstance = method.invoke(configInstance);
-                    Class<?> beanClass = method.getReturnType();
-                    String qualifier = null;
-                    if (method.isAnnotationPresent(MiniQualifier.class)) {
-                        qualifier = method.getAnnotation(MiniQualifier.class).value();
-                    }
-                    boolean isPrimary = method.isAnnotationPresent(MiniPrimary.class);
-                    setBean(beanClass, beanInstance, qualifier, isPrimary);
-                } catch (Exception e) {
-                    System.err.println("Can't instantiate " + method.getName());
-                    System.err.println(e.getMessage());
-                }
+                processBeanMethod(method);
             }
         }
+    }
 
+    private void processBeanMethod(Method method) {
+        try {
+            Object beanInstance = method.invoke(configInstance);
+            Class<?> beanClass = method.getReturnType();
+            String qualifier = extractQualifier(method);
+            boolean isPrimary = method.isAnnotationPresent(MiniPrimary.class);
+            
+            setBean(beanClass, beanInstance, qualifier, isPrimary);
+        } catch (Exception e) {
+            logBeanCreationError(method.getName(), e);
+        }
+    }
 
-        //autowired 주입
-        for (List<BeanDefinition> beanList : beans.values()) {
-            for (BeanDefinition beanDef : beanList) {
-                Object bean = beanDef.getInstance();
-                Class<?> beanClass = bean.getClass();
-                Field[] fields = beanClass.getDeclaredFields();
+    private String extractQualifier(Method method) {
+        return method.isAnnotationPresent(MiniQualifier.class)
+            ? method.getAnnotation(MiniQualifier.class).value()
+            : null;
+    }
 
-                for (Field field : fields) {
-                    if (field.isAnnotationPresent(MiniAutowired.class)) {
-                        Class<?> fieldType = field.getType();
-                        String requiredQualifier = null;
-                        if (field.isAnnotationPresent(MiniQualifier.class)) {
-                            requiredQualifier = field.getAnnotation(MiniQualifier.class).value();
-                        }
-                        
-                        Object dependency = findBean(fieldType, requiredQualifier);
-                        try {
-                            if (dependency == null)
-                                throw new NoSuchBeanException(fieldType.getName());
-                            field.setAccessible(true);
-                            field.set(bean, dependency);
-                        } catch (IllegalAccessException e) {
-                            System.err.println("Can't Set Dependency" + field.getName());
-                            System.err.println(e.getMessage());
-                        }
-                    }
-                }
+    private void logBeanCreationError(String methodName, Exception e) {
+        System.err.println("Failed to create bean from method: " + methodName);
+        System.err.println("Error: " + e.getMessage());
+    }
+
+    private void injectDependencies() {
+        beans.values().stream()
+            .flatMap(List::stream)
+            .forEach(this::injectDependenciesIntoBean);
+    }
+
+    private void injectDependenciesIntoBean(BeanDefinition beanDef) {
+        Object bean = beanDef.getInstance();
+        for (Field field : bean.getClass().getDeclaredFields()) {
+            if (field.isAnnotationPresent(MiniAutowired.class)) {
+                injectDependency(bean, field);
             }
         }
+    }
+
+    private void injectDependency(Object bean, Field field) {
+        try {
+            Class<?> fieldType = field.getType();
+            String qualifier = extractQualifier(field);
+            
+            Object dependency = findBean(fieldType, qualifier);
+            if (dependency == null) {
+                throw new NoSuchBeanException(fieldType.getName());
+            }
+            
+            field.setAccessible(true);
+            field.set(bean, dependency);
+        } catch (IllegalAccessException e) {
+            logDependencyInjectionError(bean, field, e);
+        }
+    }
+
+    private String extractQualifier(Field field) {
+        return field.isAnnotationPresent(MiniQualifier.class)
+            ? field.getAnnotation(MiniQualifier.class).value()
+            : null;
+    }
+
+    private void logDependencyInjectionError(Object bean, Field field, Exception e) {
+        System.err.println("Failed to inject dependency into " + bean.getClass().getSimpleName() + "." + field.getName());
+        System.err.println("Error: " + e.getMessage());
     }
 
     private void setBean(Class<?> type, Object instance, String qualifier, boolean isPrimary) {
@@ -145,45 +214,74 @@ public class MiniApplicationContext {
             return null;
         }
         
-        // 퀄리파이어가 null이면 모든 빈 반환, 아니면 퀄리파이어와 일치하는 빈만 필터링
-        List<BeanDefinition> matchingBeans = (qualifier == null) 
-            ? new ArrayList<>(beanList)
-            : beanList.stream()
-                .filter(beanDef -> beanDef.matchesQualifier(qualifier))
-                .toList();
-            
+        List<BeanDefinition> matchingBeans = findMatchingBeans(beanList, qualifier);
+        
         if (matchingBeans.isEmpty()) {
-            throw new NoSuchBeanException("No qualifying bean of type '" + type.getName() + 
-                "'" + (qualifier != null ? " with qualifier '" + qualifier + "'" : "") + 
-                " available");
+            throw new NoSuchBeanException(createNoSuchBeanMessage(type, qualifier));
         }
         
-        // 매칭되는 빈이 여러 개면 primary=true인 빈 찾기
         if (matchingBeans.size() > 1) {
-            List<BeanDefinition> primaryBeans = matchingBeans.stream()
-                .filter(BeanDefinition::isPrimary)
-                .toList();
-                
-            if (primaryBeans.size() == 1) {
-                return primaryBeans.get(0).getInstance();
-            } else if (primaryBeans.size() > 1) {
-                throw new NoUniqueBeanException("Multiple primary beans found for type '" + type.getName() + 
-                    "': " + primaryBeans.stream()
-                        .map(b -> b.getInstance().getClass().getName())
-                        .collect(java.util.stream.Collectors.joining(", ")));
-            }
-            
-            // primary가 없는 경우 기존과 동일하게 예외 발생
-            throw new NoUniqueBeanException("No qualifying bean of type '" + type.getName() + 
-                "'" + (qualifier != null ? " with qualifier '" + qualifier + "'" : "") + 
-                " available: expected single matching bean but found " + matchingBeans.size() + 
-                ": " + matchingBeans.stream()
-                    .map(b -> b.getInstance().getClass().getName() + 
-                         (b.getQualifier() != null ? "@'" + b.getQualifier() + "'" : ""))
-                    .collect(java.util.stream.Collectors.joining(", ")));
+            return handleMultipleMatchingBeans(type, qualifier, matchingBeans);
         }
         
         return matchingBeans.get(0).getInstance();
+    }
+    
+    private List<BeanDefinition> findMatchingBeans(List<BeanDefinition> beanList, String qualifier) {
+        return (qualifier == null) 
+            ? new ArrayList<>(beanList)
+            : beanList.stream()
+                .filter(beanDef -> beanDef.matchesQualifier(qualifier))
+                .collect(Collectors.toList());
+    }
+    
+    private Object handleMultipleMatchingBeans(Class<?> type, String qualifier, List<BeanDefinition> matchingBeans) {
+        List<BeanDefinition> primaryBeans = findPrimaryBeans(matchingBeans);
+        
+        if (primaryBeans.size() == 1) {
+            return primaryBeans.get(0).getInstance();
+        }
+        
+        if (primaryBeans.size() > 1) {
+            throw new NoUniqueBeanException(createMultiplePrimaryBeansMessage(type, primaryBeans));
+        }
+        
+        throw new NoUniqueBeanException(createNoUniqueBeanMessage(type, qualifier, matchingBeans));
+    }
+    
+    private List<BeanDefinition> findPrimaryBeans(List<BeanDefinition> beans) {
+        return beans.stream()
+            .filter(BeanDefinition::isPrimary)
+            .collect(Collectors.toList());
+    }
+    
+    private String createNoSuchBeanMessage(Class<?> type, String qualifier) {
+        return String.format("No qualifying bean of type '%s'%s available",
+            type.getName(),
+            qualifier != null ? " with qualifier '" + qualifier + "'" : "");
+    }
+    
+    private String createMultiplePrimaryBeansMessage(Class<?> type, List<BeanDefinition> primaryBeans) {
+        String beanNames = primaryBeans.stream()
+            .map(b -> b.getInstance().getClass().getName())
+            .collect(Collectors.joining(", "));
+            
+        return String.format("Multiple primary beans found for type '%s': %s", type.getName(), beanNames);
+    }
+    
+    private String createNoUniqueBeanMessage(Class<?> type, String qualifier, List<BeanDefinition> matchingBeans) {
+        String beanNames = matchingBeans.stream()
+            .map(b -> {
+                String name = b.getInstance().getClass().getName();
+                return b.getQualifier() != null ? name + "@'" + b.getQualifier() + "'" : name;
+            })
+            .collect(Collectors.joining(", "));
+            
+        return String.format("No qualifying bean of type '%s'%s available: expected single matching bean but found %d: %s",
+            type.getName(),
+            qualifier != null ? " with qualifier '" + qualifier + "'" : "",
+            matchingBeans.size(),
+            beanNames);
     }
 
     public <T> T getBean(Class<T> type) {
