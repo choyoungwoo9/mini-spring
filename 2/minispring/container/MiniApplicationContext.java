@@ -6,6 +6,7 @@ import minispring.exception.NoUniqueBeanException;
 
 import java.io.File;
 import java.io.IOException;
+import java.lang.reflect.Constructor;
 import java.lang.reflect.Field;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
@@ -99,8 +100,59 @@ public class MiniApplicationContext {
         registerInterfaces(clazz, instance, qualifier, isPrimary);
     }
 
+    // 생성 중인 빈을 추적하기 위한 컬렉션
+    private final Set<Class<?>> creatingBeans = new HashSet<>();
+    
     private Object createInstance(Class<?> clazz) throws Exception {
-        return clazz.getDeclaredConstructor().newInstance();
+        // 순환 의존성 체크
+        if (creatingBeans.contains(clazz)) {
+            throw new RuntimeException("Circular dependency detected while creating bean of type: " + clazz.getName());
+        }
+        
+        try {
+            creatingBeans.add(clazz);
+            
+            // @MiniAutowired가 붙은 생성자 또는 유일한 생성자 찾기
+            Constructor<?>[] constructors = clazz.getConstructors();
+            Constructor<?> autowiredConstructor = null;
+            
+            // @MiniAutowired가 붙은 생성자 찾기
+            for (Constructor<?> constructor : constructors) {
+                if (constructor.isAnnotationPresent(MiniAutowired.class)) {
+                    if (autowiredConstructor != null) {
+                        throw new RuntimeException("Multiple @MiniAutowired constructors found in " + clazz.getName());
+                    }
+                    autowiredConstructor = constructor;
+                }
+            }
+            
+            // @MiniAutowired가 없고 생성자가 하나뿐이면 그 생성자 사용
+            if (autowiredConstructor == null && constructors.length == 1) {
+                autowiredConstructor = constructors[0];
+            }
+            
+            // 생성자 주입
+            if (autowiredConstructor != null && autowiredConstructor.getParameterCount() > 0) {
+                Class<?>[] paramTypes = autowiredConstructor.getParameterTypes();
+                Object[] args = new Object[paramTypes.length];
+                
+                // 생성자 파라미터에 대한 의존성 주입
+                for (int i = 0; i < paramTypes.length; i++) {
+                    args[i] = findBean(paramTypes[i], null);
+                    if (args[i] == null) {
+                        throw new RuntimeException("No qualifying bean of type '" + paramTypes[i].getName() + 
+                                "' for constructor parameter " + i + " in " + clazz.getName());
+                    }
+                }
+                return autowiredConstructor.newInstance(args);
+            }
+            
+            // 기본 생성자 사용
+            return clazz.getDeclaredConstructor().newInstance();
+            
+        } finally {
+            creatingBeans.remove(clazz);
+        }
     }
 
     private String extractQualifier(Class<?> clazz) {
