@@ -13,7 +13,7 @@ import java.net.URL;
 import java.util.*;
 
 public class MiniApplicationContext {
-    private final Map<Class<?>, Object> beans = new HashMap<>();
+    private final Map<Class<?>, List<BeanDefinition>> beans = new HashMap<>();
     private Object configInstance = null;
 
     public MiniApplicationContext(Class<?> configClass) {
@@ -59,9 +59,13 @@ public class MiniApplicationContext {
                             if (!clazz.isAnnotationPresent(MiniComponent.class))
                                 continue;
                             Object instance = clazz.getDeclaredConstructor().newInstance();
-                            setBean(clazz, instance);
+                            String qualifier = null;
+                            if (clazz.isAnnotationPresent(MiniQualifier.class)) {
+                                qualifier = clazz.getAnnotation(MiniQualifier.class).value();
+                            }
+                            setBean(clazz, instance, qualifier);
                             for (Class<?> interfaceClass : clazz.getInterfaces()) {
-                                setBean(interfaceClass, instance);
+                                setBean(interfaceClass, instance, qualifier);
                             }
                         } catch (ClassNotFoundException | NoSuchMethodException | InstantiationException |
                                  IllegalAccessException | InvocationTargetException e) {
@@ -84,7 +88,11 @@ public class MiniApplicationContext {
                 try {
                     Object beanInstance = method.invoke(configInstance);
                     Class<?> beanClass = method.getReturnType();
-                    setBean(beanClass, beanInstance);
+                    String qualifier = null;
+                    if (method.isAnnotationPresent(MiniQualifier.class)) {
+                        qualifier = method.getAnnotation(MiniQualifier.class).value();
+                    }
+                    setBean(beanClass, beanInstance, qualifier);
                 } catch (Exception e) {
                     System.err.println("Can't instantiate " + method.getName());
                     System.err.println(e.getMessage());
@@ -94,40 +102,79 @@ public class MiniApplicationContext {
 
 
         //autowired 주입
-        for (Object bean : beans.values()) {
-            Class<?> beanClass = bean.getClass();
-            Field[] fields = beanClass.getDeclaredFields();
+        for (List<BeanDefinition> beanList : beans.values()) {
+            for (BeanDefinition beanDef : beanList) {
+                Object bean = beanDef.getInstance();
+                Class<?> beanClass = bean.getClass();
+                Field[] fields = beanClass.getDeclaredFields();
 
-            for (Field field : fields) {
-                if (field.isAnnotationPresent(MiniAutowired.class)) {
-                    Class<?> fieldType = field.getType();
-                    Object dependency = beans.get(fieldType);
-                    try {
-                        if (dependency == null)
-                            throw new NoSuchBeanException(fieldType.getName());
-                        field.setAccessible(true);
-                        field.set(bean, dependency);
-                    } catch (IllegalAccessException e) {
-                        System.err.println("Can't Set Dependency" + field.getName());
-                        System.err.println(e.getMessage());
+                for (Field field : fields) {
+                    if (field.isAnnotationPresent(MiniAutowired.class)) {
+                        Class<?> fieldType = field.getType();
+                        String requiredQualifier = null;
+                        if (field.isAnnotationPresent(MiniQualifier.class)) {
+                            requiredQualifier = field.getAnnotation(MiniQualifier.class).value();
+                        }
+                        
+                        Object dependency = findBean(fieldType, requiredQualifier);
+                        try {
+                            if (dependency == null)
+                                throw new NoSuchBeanException(fieldType.getName());
+                            field.setAccessible(true);
+                            field.set(bean, dependency);
+                        } catch (IllegalAccessException e) {
+                            System.err.println("Can't Set Dependency" + field.getName());
+                            System.err.println(e.getMessage());
+                        }
                     }
-
                 }
             }
         }
     }
 
-    private void setBean(Class<?> type, Object instance) {
-        if (beans.containsKey(type)) {
-            throw new NoUniqueBeanException("Multiple beans found for type: " + type.getName());
+    private void setBean(Class<?> type, Object instance, String qualifier) {
+        List<BeanDefinition> beanList = beans.computeIfAbsent(type, k -> new ArrayList<>());
+        beanList.add(new BeanDefinition(instance, qualifier));
+    }
+    
+    private Object findBean(Class<?> type, String qualifier) {
+        List<BeanDefinition> beanList = beans.get(type);
+        if (beanList == null || beanList.isEmpty()) {
+            return null;
         }
-        beans.put(type, instance);
+        
+        // 퀄리파이어가 null이면 모든 빈 반환, 아니면 퀄리파이어와 일치하는 빈만 필터링
+        List<BeanDefinition> matchingBeans = (qualifier == null) 
+            ? new ArrayList<>(beanList)
+            : beanList.stream()
+                .filter(beanDef -> beanDef.matchesQualifier(qualifier))
+                .toList();
+            
+        if (matchingBeans.isEmpty()) {
+            throw new NoSuchBeanException("No qualifying bean of type '" + type.getName() + 
+                "'" + (qualifier != null ? " with qualifier '" + qualifier + "'" : "") + 
+                " available");
+        }
+        
+        // 매칭되는 빈이 여러 개면 예외 발생
+        if (matchingBeans.size() > 1) {
+            throw new NoUniqueBeanException("No qualifying bean of type '" + type.getName() + 
+                "'" + (qualifier != null ? " with qualifier '" + qualifier + "'" : "") + 
+                " available: expected single matching bean but found " + matchingBeans.size() + 
+                ": " + matchingBeans.stream()
+                    .map(b -> b.getInstance().getClass().getName() + 
+                         (b.getQualifier() != null ? "@'" + b.getQualifier() + "'" : ""))
+                    .collect(java.util.stream.Collectors.joining(", ")));
+        }
+        
+        return matchingBeans.get(0).getInstance();
     }
 
     public <T> T getBean(Class<T> type) {
-        Object bean = beans.get(type);
-        if (bean == null)
-            throw new NoSuchBeanException("Bean not found: " + type.getName());
-        return type.cast(bean);
+        return getBean(type, null);
+    }
+
+    public <T> T getBean(Class<T> type, String qualifier) {
+        return (T) findBean(type, qualifier);
     }
 }
