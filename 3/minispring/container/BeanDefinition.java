@@ -1,7 +1,7 @@
 package minispring.container;
 
 public class BeanDefinition {
-    private final Object instance;
+    private Object instance;
     private final String qualifier;
     private final boolean primary;
     
@@ -36,5 +36,9 @@ public class BeanDefinition {
     
     public boolean isPrimary() {
         return primary;
+    }
+    
+    public void setInstance(Object instance) {
+        this.instance = instance;
     }
 }

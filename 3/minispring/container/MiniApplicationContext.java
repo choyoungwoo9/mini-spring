@@ -1,6 +1,8 @@
 package minispring.container;
 
 import minispring.annotation.*;
+import minispring.aop.AopProxy;
+import minispring.aop.PointcutMatcher;
 import minispring.exception.NoSuchBeanException;
 import minispring.exception.NoUniqueBeanException;
 
@@ -19,6 +21,7 @@ public class MiniApplicationContext {
     private Object configInstance = null;
     private final Set<Class<?>> creatingBeans = new HashSet<>();
     private final Map<Class<?>, Object> singletonObjects = new HashMap<>();
+    private final List<AspectInfo> aspects = new ArrayList<>();
 
     public MiniApplicationContext(Class<?> configClass) {
         validateConfigClass(configClass);
@@ -26,6 +29,7 @@ public class MiniApplicationContext {
         scanAndRegisterComponents(configClass);
         registerBeansFromConfigMethods(configClass);
         injectDependencies();
+        applyAop();
     }
 
     private void validateConfigClass(Class<?> configClass) {
@@ -85,7 +89,8 @@ public class MiniApplicationContext {
         
         try {
             Class<?> clazz = Class.forName(fullClassName.replace('/', '.'));
-            if (clazz.isAnnotationPresent(MiniComponent.class)) {
+            if (clazz.isAnnotationPresent(MiniComponent.class) || 
+                clazz.isAnnotationPresent(MiniAspect.class)) {
                 registerComponentClass(clazz);
             }
         } catch (Exception e) {
@@ -100,6 +105,10 @@ public class MiniApplicationContext {
         
         registerBean(clazz, instance, qualifier, isPrimary);
         registerInterfaces(clazz, instance, qualifier, isPrimary);
+        
+        if (clazz.isAnnotationPresent(MiniAspect.class)) {
+            registerAspect(instance, clazz);
+        }
     }
 
     // 생성 중인 빈을 추적하기 위한 컬렉션
@@ -361,5 +370,118 @@ public class MiniApplicationContext {
 
     public <T> T getBean(Class<T> type, String qualifier) {
         return (T) findBean(type, qualifier);
+    }
+
+    private void registerAspect(Object instance, Class<?> clazz) {
+        AspectInfo aspectInfo = new AspectInfo(instance);
+        
+        for (Method method : clazz.getDeclaredMethods()) {
+            if (method.isAnnotationPresent(MiniBefore.class)) {
+                String pointcut = method.getAnnotation(MiniBefore.class).value();
+                aspectInfo.addBeforeAdvice(method, pointcut);
+            }
+            if (method.isAnnotationPresent(MiniAfter.class)) {
+                String pointcut = method.getAnnotation(MiniAfter.class).value();
+                aspectInfo.addAfterAdvice(method, pointcut);
+            }
+        }
+        
+        aspects.add(aspectInfo);
+    }
+
+    public List<AspectInfo> getAspects() {
+        return aspects;
+    }
+
+    private void applyAop() {
+        if (aspects.isEmpty()) {
+            return;
+        }
+        
+        for (Map.Entry<Class<?>, List<BeanDefinition>> entry : beans.entrySet()) {
+            List<BeanDefinition> beanList = entry.getValue();
+            
+            for (BeanDefinition beanDef : beanList) {
+                Object bean = beanDef.getInstance();
+                if (needsProxy(bean)) {
+                    Object proxy = AopProxy.createProxy(bean, aspects);
+                    beanDef.setInstance(proxy);
+                }
+            }
+        }
+    }
+    
+    private boolean needsProxy(Object bean) {
+        if (bean.getClass().getInterfaces().length == 0) {
+            return false;
+        }
+        
+        for (Method method : bean.getClass().getMethods()) {
+            for (AspectInfo aspect : aspects) {
+                for (AdviceInfo advice : aspect.getBeforeAdvices()) {
+                    if (advice.matches(method, bean.getClass())) {
+                        return true;
+                    }
+                }
+                for (AdviceInfo advice : aspect.getAfterAdvices()) {
+                    if (advice.matches(method, bean.getClass())) {
+                        return true;
+                    }
+                }
+            }
+        }
+        return false;
+    }
+
+    public static class AspectInfo {
+        private final Object aspectInstance;
+        private final List<AdviceInfo> beforeAdvices = new ArrayList<>();
+        private final List<AdviceInfo> afterAdvices = new ArrayList<>();
+        
+        public AspectInfo(Object aspectInstance) {
+            this.aspectInstance = aspectInstance;
+        }
+        
+        public Object getAspectInstance() {
+            return aspectInstance;
+        }
+        
+        public List<AdviceInfo> getBeforeAdvices() {
+            return beforeAdvices;
+        }
+        
+        public List<AdviceInfo> getAfterAdvices() {
+            return afterAdvices;
+        }
+        
+        public void addBeforeAdvice(Method method, String pointcut) {
+            beforeAdvices.add(new AdviceInfo(method, pointcut));
+        }
+        
+        public void addAfterAdvice(Method method, String pointcut) {
+            afterAdvices.add(new AdviceInfo(method, pointcut));
+        }
+    }
+    
+    public static class AdviceInfo {
+        private final Method method;
+        private final String pointcut;
+        
+        public AdviceInfo(Method method, String pointcut) {
+            this.method = method;
+            this.pointcut = pointcut;
+        }
+        
+        public Method getMethod() {
+            return method;
+        }
+        
+        public String getPointcut() {
+            return pointcut;
+        }
+        
+        public boolean matches(Method targetMethod, Class<?> targetClass) {
+            return PointcutMatcher.matches(pointcut, targetMethod, targetClass);
+        }
     }
 }
