@@ -1,17 +1,17 @@
 package app;
 
-import minispring.annotation.MiniComponent;
+import minispring.annotation.*;
 
-// 일단 기본 구조만 만들고, AOP 어노테이션은 나중에 추가
+@MiniAspect
 @MiniComponent
 public class LogAspect {
     
-    // @MiniBefore("execution(* app.memo.*Service.*(..))")
+    @MiniBefore("app.MemoService.save")
     public void before() {
         System.out.println("[AOP] before");
     }
     
-    // @MiniAfter("execution(* app.memo.*Service.*(..))")
+    @MiniAfter("app.MemoService.save")
     public void after() {
         System.out.println("[AOP] after");
     }
