@@ -1,4 +1,4 @@
-package app.memo;
+package app;
 
 import minispring.annotation.MiniComponent;
 

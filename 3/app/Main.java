@@ -1,8 +1,6 @@
 package app;
 
 import minispring.container.MiniApplicationContext;
-import app.config.AppConfig;
-import app.memo.MemoService;
 
 public class Main {
     public static void main(String[] args) {

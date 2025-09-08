@@ -1,4 +1,4 @@
-package app.config;
+package app;
 
 import minispring.annotation.MiniConfiguration;
 import minispring.annotation.MiniComponentScan;
