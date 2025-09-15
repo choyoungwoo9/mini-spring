@@ -1,6 +1,7 @@
 package minispring.container;
 
 import minispring.annotation.*;
+import minispring.annotation.MiniController;
 import minispring.aop.AopProxy;
 import minispring.aop.PointcutMatcher;
 import minispring.exception.NoSuchBeanException;
@@ -90,7 +91,8 @@ public class MiniApplicationContext {
         try {
             Class<?> clazz = Class.forName(fullClassName.replace('/', '.'));
             if (clazz.isAnnotationPresent(MiniComponent.class) || 
-                clazz.isAnnotationPresent(MiniAspect.class)) {
+                clazz.isAnnotationPresent(MiniAspect.class) ||
+                clazz.isAnnotationPresent(MiniController.class)) {
                 registerComponentClass(clazz);
             }
         } catch (Exception e) {
@@ -370,6 +372,13 @@ public class MiniApplicationContext {
 
     public <T> T getBean(Class<T> type, String qualifier) {
         return (T) findBean(type, qualifier);
+    }
+
+    public Collection<Object> getAllBeans() {
+        return beans.values().stream()
+                .flatMap(List::stream)
+                .map(BeanDefinition::getInstance)
+                .collect(Collectors.toList());
     }
 
     private void registerAspect(Object instance, Class<?> clazz) {
