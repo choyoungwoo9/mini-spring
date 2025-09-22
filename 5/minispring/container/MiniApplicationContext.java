@@ -5,6 +5,8 @@ import minispring.annotation.MiniController;
 import minispring.aop.AopProxy;
 import minispring.aop.PointcutMatcher;
 import minispring.exception.NoSuchBeanException;
+import minispring.task.MiniThreadPoolTaskExecutor;
+import minispring.task.TaskExecutor;
 import minispring.exception.NoUniqueBeanException;
 
 import java.io.File;
@@ -13,6 +15,8 @@ import java.lang.reflect.Constructor;
 import java.lang.reflect.Field;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
+import java.lang.reflect.InvocationHandler;
+import java.lang.reflect.Proxy;
 import java.net.URL;
 import java.util.*;
 import java.util.stream.Collectors;
@@ -23,13 +27,17 @@ public class MiniApplicationContext {
     private final Set<Class<?>> creatingBeans = new HashSet<>();
     private final Map<Class<?>, Object> singletonObjects = new HashMap<>();
     private final List<AspectInfo> aspects = new ArrayList<>();
+    private TaskExecutor taskExecutor;
+    private final Map<Class<?>, List<Method>> asyncMethodCache = new HashMap<>();
 
     public MiniApplicationContext(Class<?> configClass) {
         validateConfigClass(configClass);
         initializeConfigInstance(configClass);
+        registerInternalBeans();
         scanAndRegisterComponents(configClass);
         registerBeansFromConfigMethods(configClass);
         injectDependencies();
+        applyAsync();
         applyAop();
     }
 
@@ -45,6 +53,13 @@ public class MiniApplicationContext {
         } catch (Exception e) {
             throw new RuntimeException("Failed to create config instance", e);
         }
+    }
+
+    private void registerInternalBeans() {
+        taskExecutor = new MiniThreadPoolTaskExecutor();
+        singletonObjects.put(MiniThreadPoolTaskExecutor.class, taskExecutor);
+        setBean(TaskExecutor.class, taskExecutor, null, true, MiniThreadPoolTaskExecutor.class);
+        setBean(MiniThreadPoolTaskExecutor.class, taskExecutor, null, true, MiniThreadPoolTaskExecutor.class);
     }
 
     private void scanAndRegisterComponents(Class<?> configClass) {
@@ -192,12 +207,12 @@ public class MiniApplicationContext {
     }
 
     private void registerBean(Class<?> type, Object instance, String qualifier, boolean isPrimary) {
-        setBean(type, instance, qualifier, isPrimary);
+        setBean(type, instance, qualifier, isPrimary, type);
     }
 
     private void registerInterfaces(Class<?> clazz, Object instance, String qualifier, boolean isPrimary) {
         for (Class<?> iface : clazz.getInterfaces()) {
-            setBean(iface, instance, qualifier, isPrimary);
+            setBean(iface, instance, qualifier, isPrimary, clazz);
         }
     }
 
@@ -225,7 +240,7 @@ public class MiniApplicationContext {
             String qualifier = extractQualifier(method);
             boolean isPrimary = method.isAnnotationPresent(MiniPrimary.class);
             
-            setBean(beanClass, beanInstance, qualifier, isPrimary);
+            setBean(beanClass, beanInstance, qualifier, isPrimary, beanClass);
         } catch (Exception e) {
             logBeanCreationError(method.getName(), e);
         }
@@ -285,9 +300,9 @@ public class MiniApplicationContext {
         System.err.println("Error: " + e.getMessage());
     }
 
-    private void setBean(Class<?> type, Object instance, String qualifier, boolean isPrimary) {
+    private void setBean(Class<?> type, Object instance, String qualifier, boolean isPrimary, Class<?> beanClass) {
         List<BeanDefinition> beanList = beans.computeIfAbsent(type, k -> new ArrayList<>());
-        beanList.add(new BeanDefinition(instance, qualifier, isPrimary));
+        beanList.add(new BeanDefinition(instance, qualifier, isPrimary, beanClass));
     }
     
     private Object findBean(Class<?> type, String qualifier) {
@@ -402,6 +417,73 @@ public class MiniApplicationContext {
         return aspects;
     }
 
+    private void applyAsync() {
+        if (taskExecutor == null) {
+            return;
+        }
+
+        List<BeanDefinition> definitions = beans.values().stream()
+            .flatMap(List::stream)
+            .collect(Collectors.toList());
+
+        Set<Object> processed = new HashSet<>();
+        for (BeanDefinition beanDef : definitions) {
+            Object current = beanDef.getInstance();
+            if (!processed.add(current)) {
+                continue;
+            }
+            Class<?> beanClass = beanDef.getBeanClass();
+            Object proxy = createAsyncProxyIfNeeded(current, beanClass);
+            if (proxy != null) {
+                replaceBeanInstances(current, proxy, beanClass);
+                processed.add(proxy);
+            }
+        }
+    }
+
+    private Object createAsyncProxyIfNeeded(Object target, Class<?> beanClass) {
+        List<Method> asyncMethods = asyncMethodCache.computeIfAbsent(beanClass, this::findAsyncMethods);
+        if (asyncMethods.isEmpty()) {
+            return null;
+        }
+
+        Class<?>[] interfaces = beanClass.getInterfaces();
+        if (interfaces.length == 0) {
+            return null;
+        }
+
+        Set<MethodKey> asyncMethodKeys = asyncMethods.stream()
+            .map(MethodKey::new)
+            .collect(Collectors.toSet());
+
+        return Proxy.newProxyInstance(
+            beanClass.getClassLoader(),
+            interfaces,
+            new AsyncInvocationHandler(target, asyncMethodKeys, taskExecutor)
+        );
+    }
+
+    private List<Method> findAsyncMethods(Class<?> beanClass) {
+        List<Method> result = new ArrayList<>();
+        for (Method method : beanClass.getMethods()) {
+            if (method.isAnnotationPresent(MiniAsync.class)) {
+                result.add(method);
+            }
+        }
+        return result;
+    }
+
+    private void replaceBeanInstances(Object original, Object proxy, Class<?> beanClass) {
+        for (List<BeanDefinition> beanList : beans.values()) {
+            for (BeanDefinition beanDef : beanList) {
+                if (beanDef.getInstance() == original) {
+                    beanDef.setInstance(proxy);
+                }
+            }
+        }
+        singletonObjects.put(beanClass, proxy);
+    }
+
     private void applyAop() {
         if (aspects.isEmpty()) {
             return;
@@ -440,6 +522,112 @@ public class MiniApplicationContext {
             }
         }
         return false;
+    }
+
+    private static Object invokeAndUnwrap(Method method, Object target, Object[] args) {
+        try {
+            return method.invoke(target, prepareArgs(args));
+        } catch (InvocationTargetException e) {
+            Throwable cause = e.getCause();
+            if (cause instanceof RuntimeException) {
+                throw (RuntimeException) cause;
+            }
+            throw new RuntimeException(cause);
+        } catch (IllegalAccessException e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    private static Object[] prepareArgs(Object[] args) {
+        return args == null ? new Object[0] : args;
+    }
+
+    private static final class MethodKey {
+        private final String name;
+        private final Class<?>[] parameterTypes;
+
+        MethodKey(Method method) {
+            this(method.getName(), method.getParameterTypes());
+        }
+
+        MethodKey(String name, Class<?>[] parameterTypes) {
+            this.name = name;
+            this.parameterTypes = parameterTypes;
+        }
+
+        @Override
+        public boolean equals(Object o) {
+            if (this == o) return true;
+            if (!(o instanceof MethodKey)) return false;
+            MethodKey that = (MethodKey) o;
+            return Objects.equals(name, that.name) && Arrays.equals(parameterTypes, that.parameterTypes);
+        }
+
+        @Override
+        public int hashCode() {
+            return Objects.hash(name, Arrays.hashCode(parameterTypes));
+        }
+    }
+
+    private static class AsyncInvocationHandler implements InvocationHandler {
+        private final Object target;
+        private final Set<MethodKey> asyncMethods;
+        private final TaskExecutor executor;
+
+        AsyncInvocationHandler(Object target, Set<MethodKey> asyncMethods, TaskExecutor executor) {
+            this.target = target;
+            this.asyncMethods = asyncMethods;
+            this.executor = executor;
+        }
+
+        @Override
+        public Object invoke(Object proxy, Method method, Object[] args) throws Throwable {
+            if (method.getDeclaringClass() == Object.class) {
+                return method.invoke(target, prepareArgs(args));
+            }
+
+            MethodKey key = new MethodKey(method.getName(), method.getParameterTypes());
+            if (asyncMethods.contains(key)) {
+                Object[] capturedArgs = args == null ? null : Arrays.copyOf(args, args.length);
+                executor.execute(() -> invokeAndUnwrap(method, target, capturedArgs));
+                return defaultReturnValue(method.getReturnType());
+            }
+            return invokeAndUnwrap(method, target, args);
+        }
+
+        private Object defaultReturnValue(Class<?> returnType) {
+            if (returnType == void.class || returnType == Void.class) {
+                return null;
+            }
+            if (!returnType.isPrimitive()) {
+                return null;
+            }
+            if (returnType == boolean.class) {
+                return false;
+            }
+            if (returnType == char.class) {
+                return '\0';
+            }
+            if (returnType == byte.class) {
+                return (byte) 0;
+            }
+            if (returnType == short.class) {
+                return (short) 0;
+            }
+            if (returnType == int.class) {
+                return 0;
+            }
+            if (returnType == long.class) {
+                return 0L;
+            }
+            if (returnType == float.class) {
+                return 0f;
+            }
+            if (returnType == double.class) {
+                return 0d;
+            }
+            return null;
+        }
     }
 
     public static class AspectInfo {
